@@ -1,0 +1,920 @@
+   
+
+/* ----------------------Preliminary Declarations Section--------------------*/
+   
+
+package ru.sonarplus.kernel.sqlobject.sql_parse;
+
+import java_cup.runtime.*;
+import java.text.SimpleDateFormat;
+import java.util.List;
+import java.util.ArrayList;
+import org.apache.commons.lang.StringUtils;
+import ru.sonarplus.kernel.sqlobject.objects.*;
+import ru.sonarplus.kernel.sqlobject.sql_parse.SqlParserException;
+import ru.sonarplus.kernel.dbschema.FieldTypeId;
+import com.google.common.base.Preconditions;
+import ru.sonarplus.kernel.sqlobject.common_utils.CodeValue;
+import ru.sonarplus.kernel.sqlobject.expressions.Expr;
+
+class SqlParser;
+   
+/* Parser code to change the way the parser reports errors (include
+   line and column number of the error). */
+parser code {:
+
+    private StringBuilder buildErrorMessageByInfo(Object info) {
+        StringBuilder m = new StringBuilder("Ошибка разбора sql");
+        /* Check if the information passed to the method is the same
+           type as the type java_cup.runtime.Symbol. */
+        if (info instanceof java_cup.runtime.Symbol) {
+            /* Declare a java_cup.runtime.Symbol object 's' with the
+               information in the object info that is being typecasted
+               as a java_cup.runtime.Symbol object. */
+            java_cup.runtime.Symbol s = ((java_cup.runtime.Symbol) info);
+
+            /* Check if the line number in the input is greater or
+               equal to zero. */
+            if (s.left >= 0) {
+                /* Add to the end of the StringBuilder error message
+                   the line number of the error in the input. */
+                m.append(" строка "+(s.left+1));
+                /* Check if the column number in the input is greater
+                   or equal to zero. */
+                if (s.right >= 0)
+                    /* Add to the end of the StringBuilder error message
+                       the column number of the error in the input. */
+                    m.append(", колонка "+(s.right+1));
+            }
+        }
+        return m;
+    }
+
+    /* Change the method report_error so it will display the line and
+       column of where the error occurred in the input as well as the
+       reason for the error which is passed into the method in the
+       String 'message'. */
+    public void report_error(String message, Object info) {
+        StringBuilder m = buildErrorMessageByInfo(info);
+        /* Add to the end of the StringBuilder error message created in
+           this method the message that was passed into this method. */
+        m.append(" : "+message);
+   
+        /* Print the contents of the StringBuilder 'm', which contains
+           an error message, out on a line. */
+        System.err.println(m);
+    }
+   
+    /* Change the method report_fatal_error so when it reports a fatal
+       error it will display the line and column number of where the
+       fatal error occurred in the input as well as the reason for the
+       fatal error which is passed into the method in the object
+       'message' and then exit.*/
+    public void report_fatal_error(String message, Object info)
+            throws SqlParserException{
+        //report_error(message, info);
+        //System.exit(1);
+        throw new SqlParserException(buildErrorMessageByInfo(info).toString());
+    }
+
+    public void syntax_error(Symbol cur_token) {
+      report_error("Синтаксическая ошибка", cur_token);
+    }
+
+    public void unrecovered_syntax_error(Symbol cur_token)
+            throws SqlParserException {
+      report_fatal_error("Дальнейший разбор невозможен", cur_token);
+    }
+:};
+   
+
+   
+/* ------------Declaration of Terminals and Non Terminals Section----------- */
+   
+/* Terminals (tokens returned by the scanner).  
+
+   Terminals that have no value are listed first and then terminals
+   that do have an value, in this case an integer value, are listed on
+   the next line down. */
+terminal           AS, COMMA, SELECT, FROM, STAR, DOT, WHERE, OR, AND, NOT, DIV, CONCAT, LIKE, BETWEEN, ON,
+                   IN, IS, END, CASE, ELSE, OVER, ASC, DESC, TRUE, FALSE, NULL, WHEN, EXISTS,
+                   SCALAR, SUBORD, HAVING, ORDER_BY, DISTINCT, TIMESTAMP, PARTITION_BY, LEAF_OR_EQUAL,
+                   SUBORD_DIRECT, SUBORD_OR_EQUAL, SUBORD_DIRECT_OR_EQUAL, DATE, TIME, LEAF, WITH, GROUP_BY,
+                   THEN, PARENT_L, PARENT_R, TO_CODE,
+                   EQUAL, NOT_EQUAL, LESS_EQUAL, GREAT_EQUAL, LESS, GREAT, // = <> <= >= < >
+                   BACK_QUOTE
+                   , EXTRACT, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, TIMEZONE_HOUR, TIMEZONE_MINUTE
+                   , INSERT, INTO, VALUES
+                   , DELETE
+                   , UPDATE
+                   , SET
+                   , CALL
+                   , ESCAPE
+                   , UNION, ALL, EXCEPT, MINUS, INTERSECT
+                   , CYCLE, TO, DEFAULT
+                   , REGEXP_MATCH
+                   , OFFSET, FETCH, FIRST, ROWS, ONLY
+                   ;
+terminal String   STRING, IDENTIFIER, PLUS_MINUS, NUMBER, COMMENT, JOIN_OPERATOR, CROSS_JOIN_OPERATOR;
+/*   
+ Non terminals used in the grammar section.  
+
+   Non terminals that have an object value are listed first and then
+   non terminals that have an integer value are listed.  An object
+   value means that it can be any type, it isn't set to a specific
+   type.  So it could be an Integer or a String or whatever. 
+
+
+
+*/
+non terminal /*SqlObject*/Object // т.к. результатами разбора могут быть не только SqlObject но и String/List
+request,
+insert_request,
+delete_request,
+update_request, clause_set, assignments, assignment,
+call_request,
+cursor_specification, /* ...[ORDER BY...][FETCH FIRST] */
+clause_order_by, order_items, order_item,
+
+select_statement, /* SELECT [\/*...*\/ | --... ]*/
+select_body,
+simple_select_statement,
+select_head,
+united_select_statement, united_select_statement_bracket,
+
+selected_columns, column,
+from_clause, from_items, cross_joined_tail, joined_tail, joined_table_expression, table_expression,
+with_clause, with_list, with_list_element, with_list_element_head, cycle_clause,
+clause_where,
+clause_group_by,
+
+expr_boolean, expr_boolean_or, expr_boolean_and, expr_boolean_atom,
+
+tuple, expr, expr_binary_plus_minus_concat, expr_binary_mul_div, expr_atom,
+  expr_identifier,
+  expr_case,
+    expr_case_simple, case_simple_conditions,
+    expr_case_search, case_search_conditions,
+  expr_scalar,
+  expr_func,
+  expr_over, clause_partition_by,
+  term_code, term_date, term_time, term_timestamp, term_literal
+  , expr_extract
+;
+
+non terminal Long cursor_fetch_offset, cursor_fetch_first;
+non terminal SqlParseSupport.ParsedCursorFetchStatement cursor_fetch_statement;
+non terminal String comments, extract_part, cmp_op, set_operator;
+non terminal List<String> identifiers_list, fields_list, stored_proc_qualified_name;
+
+/* -------------Precedence and Associatively of Terminals Section----------- */
+   
+/*
+  Precedence of non terminals could be defined here.  If you do define
+  precedence here you won't need to worry about precedence in the
+  Grammar Section, i.e. that TIMES should have a higher precedence
+  than PLUS.
+  
+  The precedence defined here would look something like this where the
+  lower line always will have higher precedence than the line before it.
+   
+  precedence left PLUS, MINUS; 
+  precedence left TIMES, DIVIDE; 
+*/
+
+
+
+   precedence left PARENT_L, PARENT_R;
+   precedence left AS;
+   precedence left OR;
+   precedence left AND;
+   precedence left NOT;
+   precedence left PLUS_MINUS;
+   precedence left EQUAL, NOT_EQUAL, LESS_EQUAL, GREAT_EQUAL, LESS, GREAT, STAR, DIV, CONCAT;
+   precedence left BETWEEN, LIKE, IN, IS;
+   precedence left IDENTIFIER;
+
+   request ::= cursor_specification: cursorSpec
+               {: RESULT = cursorSpec; :}
+               | delete_request: request
+               {: RESULT = request; :}
+               | insert_request: request
+               {: RESULT = request; :}
+               | update_request: request
+               {: RESULT = request; :}
+               | call_request: request
+               {: RESULT = request; :}
+               ;
+
+   identifiers_list ::= IDENTIFIER: ident
+                        {: RESULT = SqlParseSupport.buildStringList(ident); :}
+                        | identifiers_list: list COMMA IDENTIFIER: ident
+                        {: RESULT = SqlParseSupport.buildStringList(list, ident); :}
+                        ;
+
+   fields_list ::= IDENTIFIER: ident
+                   {: RESULT = SqlParseSupport.buildFieldsList(ident, false); :}
+                   | BACK_QUOTE IDENTIFIER:ident
+                   {: RESULT = SqlParseSupport.buildFieldsList(ident, true); :}
+                   | fields_list: list COMMA IDENTIFIER: ident
+                   {: RESULT = SqlParseSupport.buildFieldsList(list, ident, false); :}
+                   | fields_list: list COMMA BACK_QUOTE IDENTIFIER: ident
+                   {: RESULT = SqlParseSupport.buildFieldsList(list, ident, true); :}
+                   ;
+
+//<CALL STORED PROC>
+   stored_proc_qualified_name ::= IDENTIFIER: ident
+                                  {: RESULT = SqlParseSupport.buildStringList(ident); :}
+                                  | stored_proc_qualified_name: list DOT IDENTIFIER: ident
+                                  {: RESULT = SqlParseSupport.buildStringList(list, ident); :}
+                                  ;
+
+   call_request ::= CALL stored_proc_qualified_name: qualifiedName PARENT_L PARENT_R
+                    {: RESULT = SqlParseSupport.buildCallSP(qualifiedName, null); :}
+                    |CALL stored_proc_qualified_name: qualifiedName PARENT_L tuple: tuple PARENT_R
+                    {: RESULT = SqlParseSupport.buildCallSP(qualifiedName, tuple); :}
+                    ;
+//</CALL STORED PROC>
+
+//<UPDATE>
+   update_request ::= UPDATE IDENTIFIER: identTable clause_set: clauseSet
+                      {: RESULT = SqlParseSupport.buildUpdate(identTable, clauseSet, null); :}
+                      | UPDATE IDENTIFIER: identTable clause_set: clauseSet clause_where: clauseWhere
+                      {: RESULT = SqlParseSupport.buildUpdate(identTable, clauseSet, clauseWhere); :}
+                      ;
+
+   clause_set ::= SET assignments: assignments
+                  {: RESULT = assignments; :}
+                  ;
+
+   assignments ::= assignment: assignment
+                   {: RESULT = SqlParseSupport.buildAssignments(assignment); :}
+                   |assignments: assignments COMMA assignment: assignment
+                   {: RESULT = SqlParseSupport.buildAssignments(assignments, assignment); :}
+                   ;
+
+   assignment ::= IDENTIFIER: ident EQUAL expr: expr
+                  {: RESULT = SqlParseSupport.buildAssignment(ident, expr, false); :}
+                  | BACK_QUOTE IDENTIFIER: ident EQUAL expr: expr
+                  {: RESULT = SqlParseSupport.buildAssignment(ident, expr, true); :}
+                  ;
+//</UPDATE>
+
+//<INSERT>
+   insert_request ::= INSERT INTO IDENTIFIER: identTable PARENT_L fields_list: columnsList PARENT_R VALUES PARENT_L tuple: tuple PARENT_R
+                      {: RESULT = SqlParseSupport.buildInsert(identTable, columnsList, tuple); :}
+                      | INSERT INTO IDENTIFIER: identTable PARENT_L fields_list: columnsList PARENT_R PARENT_L select_statement: select PARENT_R
+                      {: RESULT = SqlParseSupport.buildInsert(identTable, columnsList, select); :}
+                      ;
+//</INSERT>
+
+//<DELETE>
+   delete_request ::= DELETE FROM IDENTIFIER: identTable
+                      {: RESULT = SqlParseSupport.buildDelete(identTable, null, null); :}
+                      | DELETE FROM IDENTIFIER: identTable clause_where:clauseWhere
+                      {: RESULT = SqlParseSupport.buildDelete(identTable, clauseWhere, null); :}
+                      ;
+//</DELETE>
+
+//<CURSOR SPEC>
+   cursor_fetch_statement ::= cursor_fetch_offset: fetchOffset
+                           {:
+                               RESULT = new SqlParseSupport.ParsedCursorFetchStatement().setOffset(fetchOffset);
+                           :}
+
+                           |cursor_fetch_first: fetchFirst
+                           {:
+                               RESULT = new SqlParseSupport.ParsedCursorFetchStatement().setFirst(fetchFirst);
+                           :}
+
+                           |cursor_fetch_offset: fetchOffset cursor_fetch_first: fetchFirst
+                           {:
+                               RESULT = new SqlParseSupport.ParsedCursorFetchStatement()
+                               .setOffset(fetchOffset)
+                               .setFirst(fetchFirst);
+                           :}
+                           ;
+
+   cursor_fetch_offset ::= OFFSET NUMBER: fetchOffset
+                           {:
+                               RESULT = SqlParseSupport.buildFetchStatement(fetchOffset);
+                           :}
+                           ;
+
+   cursor_fetch_first ::= FETCH FIRST NUMBER: fetchFirst
+                          {:
+                              RESULT = SqlParseSupport.buildFetchStatement(fetchFirst);
+                          :}
+                          |FETCH FIRST NUMBER: fetchFirst ROWS ONLY
+                          {:
+                              RESULT = SqlParseSupport.buildFetchStatement(fetchFirst);
+                          :}
+                          ;
+
+   cursor_specification ::= select_statement: selectStatement
+                            {:
+                                RESULT = (Select) selectStatement;
+                            :}
+
+                            | select_statement: selectStatement clause_order_by: clauseOrderBy
+                            {:
+                                RESULT = SqlParseSupport.buildCursorSpecification(selectStatement, clauseOrderBy, null);
+                            :}
+
+                            | select_statement: selectStatement cursor_fetch_statement: fetchStatement
+                            {:
+                                RESULT = SqlParseSupport.buildCursorSpecification(selectStatement, null, fetchStatement);
+                            :}
+
+                            | select_statement: selectStatement clause_order_by: clauseOrderBy cursor_fetch_statement: fetchStatement
+                            {:
+                                RESULT = SqlParseSupport.buildCursorSpecification(selectStatement, clauseOrderBy, fetchStatement);
+                            :}
+                            ;
+//</CURSOR SPEC>
+
+//<CLAUSE_ORDER_BY>
+   //TODO ORDER BY comments:comm
+   clause_order_by ::= ORDER_BY order_items: orderItems
+                       {: RESULT = orderItems; :}
+                       ;
+
+   order_items ::= order_item: orderItem
+                   {: RESULT = SqlParseSupport.buildOrderBy(orderItem); :}
+                   | order_items: orderItems COMMA order_item: orderItem
+                   {: RESULT = SqlParseSupport.buildOrderBy(orderItems, orderItem); :}
+                   ;
+
+   order_item ::= expr: e
+                  {:
+                      OrderByItem orderItem = new OrderByItem();
+                      orderItem.setExpr((ColumnExpression) e);
+                      RESULT = orderItem;
+                  :}
+
+                  | expr: e ASC
+                  {:
+                      OrderByItem orderItem = new OrderByItem();
+                      orderItem.setExpr((ColumnExpression) e);
+                      orderItem.direction = OrderByItem.OrderDirection.ASC;
+                      RESULT = orderItem;
+                  :}
+
+                  | expr: e DESC
+                  {:
+                      OrderByItem orderItem = new OrderByItem();
+                      orderItem.setExpr((ColumnExpression) e);
+                      orderItem.direction = OrderByItem.OrderDirection.DESC;
+                      RESULT = orderItem;
+                   :}
+                  //TODO разбор nulls first/last
+                  ;
+//</CLAUSE_ORDER_BY>
+
+//<SELECT>
+   select_statement ::= select_body: selectBody
+                        {:
+                            RESULT = (Select) selectBody;
+                        :}
+                        | with_clause: withClause select_body: selectBody
+                        {:  RESULT = SqlParseSupport.buildSelectStatement(withClause, selectBody); :}
+                        ;
+
+   select_body ::= simple_select_statement: selectSimple
+                   {:
+                       RESULT = selectSimple;
+                   :}
+                   | united_select_statement: selectUnited
+                   {:
+                       RESULT = selectUnited;
+                   :}
+                   ;
+
+   simple_select_statement ::= select_head:selectHead selected_columns:columns from_clause:clauseFrom clause_where:clauseWhere clause_group_by:clauseGroup
+                               {:
+                                   RESULT = SqlParseSupport.buildSimpleSelectStatement(selectHead, columns, clauseFrom, clauseWhere, clauseGroup);
+                               :}
+                               | select_head:selectHead selected_columns:columns from_clause:clauseFrom clause_where:clauseWhere
+                               {:
+                                   RESULT = SqlParseSupport.buildSimpleSelectStatement(selectHead, columns, clauseFrom, clauseWhere, null);
+                               :}
+                               | select_head:selectHead selected_columns:columns from_clause:clauseFrom
+                               {:
+                                   RESULT = SqlParseSupport.buildSimpleSelectStatement(selectHead, columns, clauseFrom, null, null);
+                               :}
+                               | select_head:selectHead selected_columns:columns from_clause:clauseFrom clause_group_by:clauseGroup
+                               {:
+                                   RESULT = SqlParseSupport.buildSimpleSelectStatement(selectHead, columns, clauseFrom, null, clauseGroup);
+                               :}
+                               ;
+
+   select_head ::= SELECT comments:comm
+                   {:  RESULT = SqlParseSupport.buildSelectHead(comm, false); :}
+                   | SELECT DISTINCT comments:comm
+                   {:  RESULT = SqlParseSupport.buildSelectHead(comm, true); :}
+                   | SELECT comments:comm DISTINCT
+                   {:  RESULT = SqlParseSupport.buildSelectHead(comm, true); :}
+                   | SELECT DISTINCT
+                   {:  RESULT = SqlParseSupport.buildSelectHead(null, true); :}
+                   | SELECT
+                   {:  RESULT = SqlParseSupport.buildSelectHead(null, false); :}
+                   ;
+//</SELECT>
+
+//<UNIONS>
+   set_operator ::= UNION ALL
+                    {: RESULT = "union all"; :}
+                    |UNION
+                    {: RESULT = "union"; :}
+                    |INTERSECT
+                    {: RESULT = "intersect"; :}
+                    |EXCEPT
+                    {: RESULT = "except"; :}
+                    |MINUS
+                    {: RESULT = "minus"; :}
+                    ;
+
+   united_select_statement ::= simple_select_statement: selectFirst set_operator: op simple_select_statement: selectSecond
+                               /*
+                                   SELECT ...
+                                   UNION
+                                   SELECT ...
+                               */
+                               {: RESULT = SqlParseSupport.buidlUnitedSelectStatement(selectFirst, op, selectSecond); :}
+
+                               | united_select_statement: unitedSelect set_operator: op simple_select_statement: selectLast
+                               /*
+                                       select ...
+                                       union
+                                       ...
+                                       select ...
+                                   UNION
+                                   SELECT...
+                               */
+                               {: RESULT = SqlParseSupport.buidlUnitedSelectStatement(unitedSelect, op, selectLast); :}
+
+                               | united_select_statement_bracket: unitedSelect set_operator: op simple_select_statement: selectLast
+                               /* то-же самое, что выше
+                                   (select ...
+                                   union
+                                   ...
+                                   select ...)
+                                   UNION
+                                   SELECT...
+                               */
+                               {: RESULT = SqlParseSupport.buidlUnitedSelectStatement(unitedSelect, op, selectLast); :}
+
+                               | simple_select_statement: selectFirst set_operator: op united_select_statement_bracket: unitedSelect
+                               /*
+                                   SELECT ...
+                                   UNION
+                                   ( SELECT ...
+                                     UNION
+                                     ...
+                                     SELECT ... )
+                               */
+                               {: RESULT = SqlParseSupport.buidlUnitedSelectStatement(selectFirst, op, unitedSelect); :}
+
+                               | united_select_statement_bracket: unitedSelectFirst set_operator: op united_select_statement_bracket: unitedSelectSecond
+                               /*
+                                   ( SELECT ...
+                                     UNION
+                                     ...
+                                     SELECT ... )
+                                   UNION
+                                   ( SELECT ...
+                                     UNION
+                                     ...
+                                     SELECT ... )
+                               */
+                               {: RESULT = SqlParseSupport.buidlUnitedSelectStatement(unitedSelectFirst, op, unitedSelectSecond); :}
+                               ;
+
+   united_select_statement_bracket ::= PARENT_L united_select_statement: unitedSelect PARENT_R
+                                       {: RESULT = unitedSelect; :}
+                                       ;
+//</UNIONS>
+
+//<CLAUSE_COLUMNS>
+   selected_columns  ::= column:c
+                         {: RESULT = SqlParseSupport.buildColumns(c); :}
+                         | selected_columns:lst COMMA column:c
+                         {: RESULT = SqlParseSupport.buildColumns(lst, c); :}
+                         ;
+
+   column ::= expr:e AS IDENTIFIER:i
+              {: RESULT = SqlParseSupport.buildColumn(e, i); :}
+              |expr:e IDENTIFIER:i
+              {: RESULT = SqlParseSupport.buildColumn(e, i); :}
+              |
+              expr:e
+              {: RESULT = SqlParseSupport.buildColumn(e, null); :}
+              ;
+//</CLAUSE_COLUMNS>
+
+//<CLAUSE_FROM>
+   from_clause ::= FROM from_items: fromItems
+                   {: RESULT = (FromContainer) fromItems; :}
+                   ;
+
+   from_items ::= table_expression: fromItem
+                  {: RESULT = SqlParseSupport.buildFromItems(fromItem); :}
+
+                  | table_expression: firstFromItem COMMA cross_joined_tail: tail
+                  {: RESULT = SqlParseSupport.buildFromItems(firstFromItem, tail); :}
+
+                  | table_expression: firstFromItem joined_tail: tail
+                  {: RESULT = SqlParseSupport.buildFromItems(firstFromItem, tail); :}
+                  ;
+
+   cross_joined_tail ::= table_expression: fromItem
+                         {: RESULT = SqlParseSupport.buildTail(fromItem); :}
+
+                         | cross_joined_tail: fromItems COMMA table_expression: fromItem
+                         {: RESULT = SqlParseSupport.buildTail(fromItems, fromItem); :}
+                         ;
+
+   joined_tail ::= joined_table_expression: fromItem
+                         {: RESULT = SqlParseSupport.buildTail(fromItem); :}
+                         | joined_tail: fromItems joined_table_expression: fromItem
+                         {: RESULT = SqlParseSupport.buildTail(fromItems, fromItem); :}
+                         ;
+
+   joined_table_expression ::= JOIN_OPERATOR: joinOp table_expression: fromItem ON expr_boolean: e
+                               {: RESULT = SqlParseSupport.buildJoinedTableExpression(joinOp, fromItem, e); :}
+                               | CROSS_JOIN_OPERATOR table_expression: fromItem
+                               {: RESULT = SqlParseSupport.buildJoinedTableExpression(fromItem); :}
+                               ;
+
+   table_expression ::= IDENTIFIER: identTable
+                        // ..TABLE...
+                        {: RESULT = SqlParseSupport.buildTableExpression(identTable, null); :}
+                        | IDENTIFIER: identTable AS IDENTIFIER: identAlias
+                        // ..TABLE AS ALIAS...
+                        {: RESULT = SqlParseSupport.buildTableExpression(identTable, identAlias); :}
+                        | IDENTIFIER: identTable IDENTIFIER: identAlias
+                        // ..TABLE ALIAS...
+                        {: RESULT = SqlParseSupport.buildTableExpression(identTable, identAlias); :}
+                        | PARENT_L select_body: select PARENT_R AS IDENTIFIER: identAlias
+                        // ..(SELECT...) AS ALIAS...
+                        {: RESULT = SqlParseSupport.buildTableExpression(select, identAlias); :}
+                        | PARENT_L select_body: select PARENT_R IDENTIFIER: identAlias
+                        // ..(SELECT...) ALIAS...
+                        {: RESULT = SqlParseSupport.buildTableExpression(select, identAlias); :}
+                        ;
+
+//</CLAUSE_FROM>
+
+//<CLAUSE_WHERE>
+   clause_where ::= WHERE expr_boolean: predicate
+                    {: RESULT = SqlParseSupport.buildClauseWhere(predicate); :}
+                    ;
+//</CLAUSE_WHERE>
+
+//<CLAUSE_GROUP>
+   clause_group_by ::= GROUP_BY tuple: tuple
+                       {: RESULT = SqlParseSupport.buildClauseGroupBy(tuple); :}
+                       | GROUP_BY tuple: tuple HAVING expr_boolean: predicate
+                       {: RESULT = SqlParseSupport.buildClauseGroupBy(tuple, predicate); :}
+                       //| HAVING expr_boolean: predicate // TODO нужен ли HAVING без GROUP BY
+                       //{::}
+                       ;
+//</CLAUSE_GROUP>
+
+//<WITH>
+   with_clause ::= WITH with_list: withList
+                   {:
+                       RESULT = (CTEsContainer) withList;
+                   :}
+                   ;
+
+   with_list ::= with_list_element: withListElement
+                 {: RESULT = SqlParseSupport.buildWithList(withListElement); :}
+                 | with_list: withList COMMA with_list_element: withListElement
+                 {: RESULT = SqlParseSupport.buildWithList(withList, withListElement); :}
+                 ;
+
+   with_list_element ::= with_list_element_head: withListElementHead
+                         {:
+                             RESULT = (CommonTableExpression) withListElementHead;
+                         :}
+                         | with_list_element_head: withListElementHead cycle_clause: cycleClause
+                         {: RESULT = SqlParseSupport.buildCte(withListElementHead, cycleClause); :}
+                         ;
+
+   with_list_element_head ::= IDENTIFIER: ident PARENT_L identifiers_list: withColumnList PARENT_R AS PARENT_L select_body: selectBody PARENT_R
+                              {: RESULT = SqlParseSupport.buildCteHead(ident, withColumnList, selectBody); :}
+                              ;
+
+   cycle_clause ::= CYCLE identifiers_list: cycleColumns SET IDENTIFIER: cycleMarkerName TO STRING: markerCycled DEFAULT STRING: markerDefault
+                    {: RESULT = SqlParseSupport.buildCteCycleClause(cycleColumns, cycleMarkerName, markerCycled, markerDefault); :}
+                    ;
+//</WITH>
+
+   tuple ::= expr: expr
+             {: RESULT = SqlParseSupport.buildTuple(expr); :}
+             |tuple: tuple COMMA expr: expr
+             {: RESULT = SqlParseSupport.buildTuple(tuple, expr); :}
+             ;
+
+//<boolean>
+   expr_boolean ::= NOT PARENT_L expr_boolean_or: expr_boolean_or PARENT_R
+                    {:
+                        Predicate predicate = (Predicate) expr_boolean_or;
+                        predicate.not = !predicate.not;
+                        RESULT = predicate;
+                    :}
+                    | expr_boolean_or: expr_boolean_or
+                    {: RESULT = expr_boolean_or; :}
+                    ;
+
+   expr_boolean_or ::= expr_boolean_and: predicate
+                    {: RESULT = (Predicate) predicate; :}
+                    | NOT PARENT_L expr_boolean_and: expr_boolean PARENT_R
+                    {:
+                        Predicate predicate = (Predicate) expr_boolean;
+                        predicate.not = !predicate.not;
+                        RESULT = predicate;
+                    :}
+                    | expr_boolean: predicateOr OR expr_boolean_and: predicate
+                    {: RESULT = SqlParseSupport.buildPredicateBracket(predicateOr, predicate, Conditions.BooleanOp.OR, false); :}
+                    | expr_boolean: predicateOr OR NOT PARENT_L expr_boolean_and PARENT_R: predicate
+                    {: RESULT = SqlParseSupport.buildPredicateBracket(predicateOr, predicate, Conditions.BooleanOp.OR, true); :}
+                    ;
+
+   expr_boolean_and ::= expr_boolean_atom: predicateAtom
+                        {: RESULT = predicateAtom; :}
+                        | NOT expr_boolean_atom: predicateAtom
+                        {:
+                            Predicate predicate = (Predicate) predicateAtom;
+                            predicate.not = !predicate.not;
+                            RESULT = predicate;
+                        :}
+                        | NOT PARENT_L expr_boolean_atom: predicateAtom PARENT_R
+                        {:
+                            Predicate predicate = (Predicate) predicateAtom;
+                            predicate.not = !predicate.not;
+                            RESULT = predicate;
+                        :}
+                        | expr_boolean_and: predicateAnd AND expr_boolean_atom: predicate
+                        {: RESULT = SqlParseSupport.buildPredicateBracket(predicateAnd, predicate, Conditions.BooleanOp.AND, false); :}
+                        | expr_boolean_and: predicateAnd AND NOT expr_boolean_atom: predicate
+                        {: RESULT = SqlParseSupport.buildPredicateBracket(predicateAnd, predicate, Conditions.BooleanOp.AND, true); :}
+                        ;
+
+   cmp_op ::= EQUAL {: RESULT = "="; :}
+              |NOT_EQUAL {: RESULT = "<>"; :}
+              |LESS_EQUAL {: RESULT = "<="; :}
+              |GREAT_EQUAL {: RESULT = ">="; :}
+              |LESS {: RESULT = "<"; :}
+              |GREAT {: RESULT = ">"; :}
+              ;
+
+   expr_boolean_atom ::=
+                    REGEXP_MATCH PARENT_L expr: source COMMA expr: template PARENT_R
+                    {: RESULT = SqlParseSupport.buildRegExpMatch(source, template, null); :}
+                    |REGEXP_MATCH PARENT_L expr: source COMMA expr: template COMMA STRING: params PARENT_R
+                    {: RESULT = SqlParseSupport.buildRegExpMatch(source, template, params); :}
+                    | expr:first LIKE expr:second ESCAPE STRING:s
+                    {: RESULT = SqlParseSupport.buildLike(first, second, s, false); :}
+                    | expr:first NOT LIKE expr:second ESCAPE STRING:s
+                    {: RESULT = SqlParseSupport.buildLike(first, second, s, true); :}
+                    |expr:first LIKE expr:second
+                    {: RESULT = SqlParseSupport.buildLike(first, second, null, false); :}
+                    | expr:first NOT LIKE expr:second
+                    {: RESULT = SqlParseSupport.buildLike(first, second, null, true); :}
+                   | SUBORD PARENT_L expr:first COMMA expr:second PARENT_R
+                   {: RESULT = SqlParseSupport.buildCodeCmp(first, second, PredicateForCodeComparison.ComparisonCodeOperation.CODE_ALL); :}
+                   | SUBORD_DIRECT PARENT_L expr:first COMMA expr:second PARENT_R
+                   {: RESULT = SqlParseSupport.buildCodeCmp(first, second, PredicateForCodeComparison.ComparisonCodeOperation.CODE_VASSAL); :}
+                   | SUBORD_DIRECT_OR_EQUAL PARENT_L expr:first COMMA expr:second PARENT_R
+                   {: RESULT = SqlParseSupport.buildCodeCmp(first, second, PredicateForCodeComparison.ComparisonCodeOperation.ROOT_VASSAL); :}
+                   | LEAF PARENT_L expr:first COMMA expr:second PARENT_R
+                   {: RESULT = SqlParseSupport.buildCodeCmp(first, second, PredicateForCodeComparison.ComparisonCodeOperation.CODE_LEAF); :}
+                   | LEAF_OR_EQUAL PARENT_L expr:first COMMA expr:second PARENT_R
+                   {: RESULT = SqlParseSupport.buildCodeCmp(first, second, PredicateForCodeComparison.ComparisonCodeOperation.ROOT_LEAF); :}
+                   | SUBORD_OR_EQUAL PARENT_L expr:first COMMA expr:second PARENT_R
+                   {: RESULT = SqlParseSupport.buildCodeCmp(first, second, PredicateForCodeComparison.ComparisonCodeOperation.ROOT_ALL); :}
+                   |expr:operand BETWEEN expr:first AND expr:second
+                   {: RESULT = SqlParseSupport.buildBetween(operand, first, second, false); :}
+                   |expr:operand NOT BETWEEN expr:first AND expr:second
+                   {: RESULT = SqlParseSupport.buildBetween(operand, first, second, true); :}
+                   |EXISTS PARENT_L select_body: select PARENT_R
+                   {: RESULT = SqlParseSupport.buildExists(select); :}
+                   |expr: expr IS NULL
+                   {: RESULT = SqlParseSupport.buildIsNull(expr, false); :}
+                   |expr: expr IS NOT NULL
+                   {: RESULT = SqlParseSupport.buildIsNull(expr, true); :}
+                   |expr: expr IN PARENT_L select_body: select PARENT_R
+                   {: RESULT = SqlParseSupport.buildInSelect(expr, select, false); :}
+                   |expr: expr NOT IN PARENT_L select_body: select PARENT_R
+                   {: RESULT = SqlParseSupport.buildInSelect(expr, select, true); :}
+                   |PARENT_L tuple: tuple PARENT_R IN PARENT_L select_body: select PARENT_R
+                   {: RESULT = SqlParseSupport.buildInSelect(tuple, select, false); :}
+                   |PARENT_L tuple: tuple PARENT_R NOT IN PARENT_L select_body: select PARENT_R
+                   {: RESULT = SqlParseSupport.buildInSelect(tuple, select, true); :}
+                   |expr: expr IN PARENT_L tuple: tuple PARENT_R
+                   {: RESULT = SqlParseSupport.buildInTuple(expr, tuple, false); :}
+                   |expr: expr NOT IN PARENT_L tuple: tuple PARENT_R
+                   {: RESULT = SqlParseSupport.buildInTuple(expr, tuple, true); :}
+                   |expr: first cmp_op: oper expr: second
+                   {: RESULT = SqlParseSupport.buildComparison(first, oper, second); :}
+
+                   | PARENT_L expr_boolean: predicate PARENT_R
+                   {: RESULT = (Predicate) predicate; :}
+
+                   ;
+
+//</boolean>
+
+//<expr>
+   expr ::= expr_binary_plus_minus_concat: expr
+            {: RESULT = expr; :}
+            ;
+
+   // операция конкатенации || имеет такой-же приоритет как +-. по крайней мере в Oracle
+   expr_binary_plus_minus_concat ::= expr_binary_mul_div: expr
+                                     {: RESULT = expr; :}
+                                     | expr_binary_plus_minus_concat: expr1 PLUS_MINUS: op expr_binary_mul_div: expr2
+                                     {: RESULT = SqlParseSupport.buildExprBinary(expr1, op, expr2); :}
+                                     | expr_binary_plus_minus_concat: expr1 CONCAT expr_binary_mul_div: expr2
+                                     {: RESULT = SqlParseSupport.buildExprBinary(expr1, "||", expr2); :}
+                                     ;
+
+   // унарные операции явно здесь пока не выделяем, т.к Oracle вполне понимает выражения "select 2+1- -1 from dual"
+   // главное, чтобы знак минус не шёл два раза подряд
+   expr_binary_mul_div ::= expr_atom: expr
+                           {: RESULT = expr; :}
+                           | expr_binary_mul_div: expr1 STAR expr_atom: expr2
+                           {: RESULT = SqlParseSupport.buildExprBinary(expr1, "*", expr2); :}
+                           | expr_binary_mul_div: expr1 DIV expr_atom: expr2
+                           {: RESULT = SqlParseSupport.buildExprBinary(expr1, "/", expr2); :}
+                           ;
+
+   expr_atom ::= expr_identifier: expr
+                 {: RESULT = expr; :}
+
+                 | expr_case: expr
+                 {: RESULT = expr; :}
+
+                 | expr_scalar: expr
+                 {: RESULT = expr; :}
+
+                 | expr_func: expr
+                 {: RESULT = expr; :}
+
+                 | expr_extract: expr
+                 {: RESULT = expr; :}
+
+                 | expr_over: expr
+                 {: RESULT = expr; :}
+
+                 | term_code: expr
+                 {: RESULT = expr; :}
+
+                 | term_date: expr
+                 {: RESULT = expr; :}
+
+                 | term_time: expr
+                 {: RESULT = expr; :}
+
+                 | term_timestamp: expr
+                 {: RESULT = expr; :}
+
+                 | term_literal: expr
+                 {: RESULT = expr; :}
+
+                 | PLUS_MINUS: sign expr_atom: expr // "-..." | "+..."
+                   {: RESULT = SqlParseSupport.buildExprUnary(sign, expr); :}
+
+                 | PARENT_L expr: expr PARENT_R // "(...)"
+                 {: RESULT = SqlParseSupport.buildExprBracket(expr); :}
+                 ;
+
+   expr_extract ::= EXTRACT PARENT_L YEAR FROM expr: exprFrom PARENT_R
+                    {: RESULT = SqlParseSupport.buildExprExtractYear(exprFrom); :}
+                    | EXTRACT PARENT_L extract_part: s FROM expr: exprFrom PARENT_R
+                    {: RESULT = SqlParseSupport.buildExprExtract(s, exprFrom); :}
+                    ;
+
+   extract_part ::= MONTH
+                    {: RESULT = "MONTH"; :}
+                    | DAY
+                    {: RESULT = "DAY"; :}
+                    | HOUR
+                    {: RESULT = "HOUR"; :}
+                    | MINUTE
+                    {: RESULT = "MINUTE"; :}
+                    | SECOND
+                    {: RESULT = "SECOND"; :}
+                    | TIMEZONE_HOUR
+                    {: RESULT = "TIMEZONE_HOUR"; :}
+                    | TIMEZONE_MINUTE
+                    {: RESULT = "TIMEZONE_MINUTE"; :}
+                    ;
+
+   expr_identifier  ::= IDENTIFIER:i
+                        {: RESULT = SqlParseSupport.buildIdentifier(i); :}
+                        | STAR
+                        {: RESULT = SqlParseSupport.buildStar(); :}
+                        | IDENTIFIER:id_first DOT IDENTIFIER:id_next
+                        {: RESULT = SqlParseSupport.buildQualifiedIdentifier(id_first, id_next, false); :}
+                        | IDENTIFIER:id DOT STAR
+                        {: RESULT = SqlParseSupport.buildQualifiedStar(id); :}
+                        | BACK_QUOTE IDENTIFIER:id
+                        {: RESULT = SqlParseSupport.buildQualifiedIdentifier("", id, true); :}
+                        | IDENTIFIER:id_first DOT BACK_QUOTE IDENTIFIER:id_next
+                        {: RESULT = SqlParseSupport.buildQualifiedIdentifier(id_first, id_next, true); :}
+                        ;
+
+   expr_case ::= expr_case_simple: caseSimple
+                 {: RESULT = (CaseSimple) caseSimple; :}
+                 | expr_case_search: caseSearch
+                 {: RESULT = (CaseSearch) caseSearch; :}
+                 ;
+
+   expr_case_simple ::= CASE expr: caseExpr case_simple_conditions: caseSimpleConditions ELSE expr: caseElse END
+                        {: RESULT = SqlParseSupport.buildCaseSimple(caseExpr, caseSimpleConditions, caseElse); :}
+                        |CASE expr: caseExpr case_simple_conditions: caseSimpleConditions END
+                        {: RESULT = SqlParseSupport.buildCaseSimple(caseExpr, caseSimpleConditions, null); :}
+                        ;
+   case_simple_conditions ::= WHEN expr: exprWhen THEN expr: exprThen
+                              {: RESULT = SqlParseSupport.buildCaseSimpleConditions(exprWhen, exprThen); :}
+                              |case_simple_conditions: caseSimple WHEN expr: exprWhen THEN expr: exprThen
+                              {: RESULT = SqlParseSupport.buildCaseSimpleConditions(caseSimple, exprWhen, exprThen); :}
+                              ;
+
+   expr_case_search ::= CASE case_search_conditions: caseSearchConditions ELSE expr: caseElse END
+                        {: RESULT = SqlParseSupport.buildCaseSearch(caseSearchConditions, caseElse); :}
+                        |CASE case_search_conditions: caseSearchConditions END
+                        {: RESULT = (CaseSearch) caseSearchConditions; :}
+                        ;
+
+   case_search_conditions ::= WHEN expr_boolean: exprWhen THEN expr: exprThen
+                              {: RESULT = SqlParseSupport.buildCaseSearchConditions(exprWhen, exprThen); :}
+                              |case_search_conditions: caseSearch WHEN expr_boolean: exprWhen THEN expr: exprThen
+                              {: RESULT = SqlParseSupport.buildCaseSearchConditions(caseSearch, exprWhen, exprThen); :}
+                              ;
+
+   expr_scalar ::= SCALAR PARENT_L select_body:s PARENT_R
+                   {: RESULT = SqlParseSupport.buildExprScalar(s); :}
+                   ;
+
+   expr_func ::= IDENTIFIER: ident PARENT_L DISTINCT tuple: tuple PARENT_R
+                 {:  RESULT = SqlParseSupport.buildExprFunction(ident, tuple, true); :}
+
+                 | IDENTIFIER: ident PARENT_L tuple: tuple PARENT_R
+                 {:  RESULT = SqlParseSupport.buildExprFunction(ident, tuple, false); :}
+
+                 | IDENTIFIER: ident PARENT_L PARENT_R
+                 {:  RESULT = SqlParseSupport.buildExprFunction(ident, null, false); :}
+                 ;
+
+   expr_over ::= expr_func:func OVER PARENT_L PARENT_R
+                 {: RESULT = SqlParseSupport.buildExprFunctionOver(func, null, null); :}
+
+                 |expr_func:func OVER PARENT_L clause_partition_by:part clause_order_by:order PARENT_R
+                 {: RESULT = SqlParseSupport.buildExprFunctionOver(func, part, order); :}
+
+                 |expr_func:func OVER PARENT_L clause_partition_by:part PARENT_R
+                 {: RESULT = SqlParseSupport.buildExprFunctionOver(func, part, null); :}
+                 ;
+
+   clause_partition_by ::= PARTITION_BY tuple: tuple
+                           {: RESULT = tuple; :}
+                           ;
+
+   term_code ::= TO_CODE PARENT_L STRING:s PARENT_R
+                 {: RESULT = SqlParseSupport.buildValueCode(s); :}
+                 ;
+
+   term_date ::= DATE STRING:s
+                 {: RESULT = SqlParseSupport.buildValueDate(s); :}
+                 ;
+
+   term_time ::= TIME STRING:s
+                 {: RESULT = SqlParseSupport.buildValueTime(s); :}
+                 ;
+
+   term_timestamp ::= TIMESTAMP STRING:s
+                      {: RESULT = SqlParseSupport.buildValueTimeStamp(s); :}
+                      ;
+
+   term_literal ::= TRUE
+                    {: RESULT = new ValueConst(Boolean.valueOf(true)); :}
+                    | FALSE
+                    {: RESULT = new ValueConst(Boolean.valueOf(false)); :}
+                    | NUMBER:s
+                    {: RESULT = SqlParseSupport.buildValueNumber(s); :}
+                    | STRING:s
+                    {: RESULT = new ValueConst((String) s); :}
+                    | NULL
+                    {: RESULT = ValueConst.createNull(); :}
+                    ;
+
+//todo expr_extract
+
+   comments ::= COMMENT:c
+                {: RESULT = SqlParseSupport.buildComment(c); :}
+                ;
+

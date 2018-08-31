@@ -1,0 +1,1 @@
+java.exe -cp ..\..\..\..\..\..\..\..\..\bin\java-cup-11b.jar java_cup.Main < sql.cup
